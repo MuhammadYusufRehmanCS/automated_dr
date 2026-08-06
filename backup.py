@@ -1,7 +1,7 @@
-import os
-import random
-from azure.identity import DefaultAzureCrendential
-from azure.compute import ComputeManagementClient
+from datetime import datetime
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.compute import ComputeManagementClient
+from azure.mgmt.compute.models import Snapshot, CreationData
 
 credential = DefaultAzureCredential()
 
@@ -10,7 +10,7 @@ RESOURCE_GROUP = "rg-disaster-recovery"
 LOCATION = "eastus"
 DISK_NAME = "test-vm-disk"
 
-compute_client = ComputeManagementClient(credentials, SUBSCRIPTION_ID)
+compute_client = ComputeManagementClient(credential, SUBSCRIPTION_ID)
 disk = compute_client.disks.get(RESOURCE_GROUP, DISK_NAME)
 
 # creating a snapshot
@@ -18,17 +18,19 @@ timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 snapshot_name = f"snapshot-{DISK_NAME}-{timestamp}"
 print(f"Creating snapshot '{snapshot_name}' for disk '{DISK_NAME}'...")
 
-poller = compute.client.snapshots.begin_create_or_update(
+snapshot_parameters = Snapshot(
+    location=LOCATION,
+    creation_data=CreationData(
+        create_option="Copy",
+        source_resource_id=disk.id
+    ),
+    tags={'CreatedBy': 'PythonScript'}
+)
+
+poller = compute_client.snapshots.begin_create_or_update(
     RESOURCE_GROUP,
     snapshot_name,
-    {
-        'location' : LOCATION,
-        'creation_date' : {
-            'create_option' : 'Copy',
-            'source_resource_id' : disk.id
-        },
-        'tags' : {'CreatedBy' : 'PythonScript'}
-    }
+    snapshot_parameters
 )
 
 # Optional just outputs the results in the cli 
