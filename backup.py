@@ -6,34 +6,36 @@ from azure.identity import ManagedIdentityCredential
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.compute.models import Snapshot, CreationData
 
-# Import Azure Automation assets library to read variables dynamically
 try:
     from automationassets import get_automation_variable
 except ImportError:
-    # Fallback for local testing via os.environ
     def get_automation_variable(name):
         return os.environ.get(name)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 def main():
-    # 1. Fetch Subscription ID provided automatically by Azure execution environment
-    subscription_id = get_automation_variable("AZURE_SUBSCRIPTION_ID")
-    
-    # 2. Fetch configuration dynamically from Azure Automation Variables
-    resource_group = get_automation_variable("AZURE_RESOURCE_GROUP")
-    disk_name = get_automation_variable("AZURE_DISK_NAME")
-    location = get_automation_variable("AZURE_LOCATION")
+    # Strip potential hidden whitespaces from variable inputs
+    subscription_id = str(get_automation_variable("AZURE_SUBSCRIPTION_ID")).strip()
+    resource_group = str(get_automation_variable("AZURE_RESOURCE_GROUP")).strip()
+    disk_name = str(get_automation_variable("AZURE_DISK_NAME")).strip()
+    location = str(get_automation_variable("AZURE_LOCATION")).strip()
 
-    if not all([subscription_id, resource_group, disk_name, location]):
-        raise ValueError("Missing required environment configuration variables.")
-
-    logging.info(f"Authenticating via System-Assigned Managed Identity...")
+    logging.info("Authenticating via System-Assigned Managed Identity...")
     credential = ManagedIdentityCredential()
     compute_client = ComputeManagementClient(credential, subscription_id)
 
-    logging.info(f"Fetching target disk '{disk_name}' from group '{resource_group}'...")
-    disk = compute_client.disks.get(resource_group, disk_name)
+    logging.info(f"Searching for disk '{disk_name}' inside group '{resource_group}'...")
+    
+    # List disks in the resource group to grab the exact source resource ID dynamically
+    disks = list(compute_client.disks.list_by_resource_group(resource_group))
+    target_disk = next((d for d in disks if d.name.strip().lower() == disk_name.lower()), None)
+
+    if not target_disk:
+        available_names = [d.name for d in disks]
+        raise ValueError(f"Disk '{disk_name}' not found in RG '{resource_group}'. Found disks: {available_names}")
+
+    logging.info(f"Target disk resolved: {target_disk.id}")
 
     timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     snapshot_name = f"snapshot-{disk_name}-{timestamp}"
@@ -42,7 +44,7 @@ def main():
         location=location,
         creation_data=CreationData(
             create_option="Copy",
-            source_resource_id=disk.id
+            source_resource_id=target_disk.id
         ),
         tags={"ManagedBy": "AzureAutomation", "Environment": "Production"}
     )
