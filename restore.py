@@ -1,73 +1,50 @@
 import os
+import sys
 import logging
-from azure.identity import DefaultAzureCredential
+from azure.identity import ManagedIdentityCredential
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.compute.models import Disk, CreationData
-from azure.core.exceptions import AzureError
-from dotenv import load_dotenv
 
-# Load variables from .env file
-load_dotenv()
+try:
+    from automationassets import get_automation_variable
+except ImportError:
+    def get_automation_variable(name):
+        return os.environ.get(name)
 
-# Configure logging to console and file
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("dr_operations.log"),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Load configuration from environment
-SUBSCRIPTION_ID = os.getenv("AZURE_SUBSCRIPTION_ID")
-RESOURCE_GROUP = os.getenv("AZURE_RESOURCE_GROUP")
-LOCATION = os.getenv("AZURE_LOCATION")
-RESTORED_DISK_NAME = os.getenv("AZURE_RESTORED_DISK_NAME", "restored-vm-disk")
+def restore_disk(snapshot_name, new_disk_name):
+    subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID")
+    resource_group = get_automation_variable("AZURE_RESOURCE_GROUP")
+    location = get_automation_variable("AZURE_LOCATION")
 
-# Safety validation
-if not SUBSCRIPTION_ID:
-    raise ValueError("CRITICAL ERROR: 'AZURE_SUBSCRIPTION_ID' missing in .env file!")
+    credential = ManagedIdentityCredential()
+    compute_client = ComputeManagementClient(credential, subscription_id)
 
-def run_restore():
-    try:
-        logging.info("Initializing Azure Compute Client...")
-        credential = DefaultAzureCredential()
-        compute_client = ComputeManagementClient(credential, SUBSCRIPTION_ID)
+    logging.info(f"Fetching snapshot '{snapshot_name}'...")
+    snapshot = compute_client.snapshots.get(resource_group, snapshot_name)
 
-        logging.info(f"Fetching existing snapshots in Resource Group '{RESOURCE_GROUP}'...")
-        snapshots = list(compute_client.snapshots.list_by_resource_group(RESOURCE_GROUP))
+    disk_params = Disk(
+        location=location,
+        creation_data=CreationData(
+            create_option="Copy",
+            source_resource_id=snapshot.id
+        ),
+        tags={"ManagedBy": "AzureAutomation", "Type": "RestoredDisk"}
+    )
 
-        if not snapshots:
-            logging.warning("No snapshots found in resource group. Restore aborted.")
-            return
-
-        latest_snapshot = snapshots[-1]
-        logging.info(f"Selected latest snapshot for recovery: '{latest_snapshot.name}'")
-
-        disk_parameters = Disk(
-            location=LOCATION,
-            creation_data=CreationData(
-                create_option="Copy",
-                source_resource_id=latest_snapshot.id
-            ),
-            sku={'name': 'Standard_LRS'}
-        )
-
-        logging.info(f"Initiating restoration to new Managed Disk '{RESTORED_DISK_NAME}'...")
-        poller = compute_client.disks.begin_create_or_update(
-            RESOURCE_GROUP,
-            RESTORED_DISK_NAME,
-            disk_parameters
-        )
-
-        restored_disk = poller.result()
-        logging.info(f"SUCCESS: Disk restored successfully. ID: {restored_disk.id}")
-
-    except AzureError as ae:
-        logging.error(f"Azure API Error during restore: {ae.message}")
-    except Exception as e:
-        logging.error(f"Unexpected error during restore: {str(e)}")
+    logging.info(f"Restoring snapshot to new managed disk '{new_disk_name}'...")
+    poller = compute_client.disks.begin_create_or_update(
+        resource_group,
+        new_disk_name,
+        disk_params
+    )
+    restored_disk = poller.result()
+    logging.info(f"SUCCESS: Disk restored. ID: {restored_disk.id}")
 
 if __name__ == "__main__":
-    run_restore()
+    # In Azure Runbooks, arguments passed via Portal arrive in sys.argv
+    if len(sys.argv) > 2:
+        restore_disk(sys.argv[1], sys.argv[2])
+    else:
+        logging.error("Missing arguments: snapshot_name and new_disk_name required.")

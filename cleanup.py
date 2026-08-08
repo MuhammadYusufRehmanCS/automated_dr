@@ -1,68 +1,38 @@
 import os
 import logging
-from datetime import datetime, timezone, timedelta
-from azure.identity import DefaultAzureCredential
+from datetime import datetime, timezone
+from azure.identity import ManagedIdentityCredential
 from azure.mgmt.compute import ComputeManagementClient
-from azure.core.exceptions import AzureError
-from dotenv import load_dotenv
 
-# Load variables from .env file
-load_dotenv()
+try:
+    from automationassets import get_automation_variable
+except ImportError:
+    def get_automation_variable(name):
+        return os.environ.get(name)
 
-# Configure logging to console and file
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("dr_operations.log"),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Load configuration from environment
-SUBSCRIPTION_ID = os.getenv("AZURE_SUBSCRIPTION_ID")
-RESOURCE_GROUP = os.getenv("AZURE_RESOURCE_GROUP")
-RETENTION_DAYS = int(os.getenv("AZURE_RETENTION_DAYS", "7"))
+RETENTION_DAYS = 30
 
-# Safety validation
-if not SUBSCRIPTION_ID:
-    raise ValueError("CRITICAL ERROR: 'AZURE_SUBSCRIPTION_ID' missing in .env file!")
+def cleanup_snapshots():
+    subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID")
+    resource_group = get_automation_variable("AZURE_RESOURCE_GROUP")
 
-def run_cleanup():
-    try:
-        logging.info("Initializing Azure Compute Client...")
-        credential = DefaultAzureCredential()
-        compute_client = ComputeManagementClient(credential, SUBSCRIPTION_ID)
+    logging.info("Authenticating via Managed Identity...")
+    credential = ManagedIdentityCredential()
+    compute_client = ComputeManagementClient(credential, subscription_id)
 
-        logging.info(f"Scanning snapshots older than {RETENTION_DAYS} days in '{RESOURCE_GROUP}'...")
-        snapshots = compute_client.snapshots.list_by_resource_group(RESOURCE_GROUP)
+    now = datetime.now(timezone.utc)
+    snapshots = compute_client.snapshots.list_by_resource_group(resource_group)
 
-        now = datetime.now(timezone.utc)
-        deleted_count = 0
-
-        for snapshot in snapshots:
-            created_time = snapshot.time_created
-            age = now - created_time
-
-            logging.info(f"Evaluating Snapshot: '{snapshot.name}' (Age: {age.days} days, {age.seconds // 3600} hours)")
-
-            if age > timedelta(days=RETENTION_DAYS):
-                logging.info(f"Snapshot '{snapshot.name}' exceeds retention limit! Deleting...")
-                poller = compute_client.snapshots.begin_delete(RESOURCE_GROUP, snapshot.name)
-                poller.result()
-                logging.info(f"SUCCESS: Purged snapshot '{snapshot.name}'.")
-                deleted_count += 1
-            else:
-                logging.info(f"Snapshot '{snapshot.name}' is within retention limit. Retaining.")
-
-        logging.info("=" * 50)
-        logging.info(f"Cleanup finished. Total snapshots purged: {deleted_count}")
-        logging.info("=" * 50)
-
-    except AzureError as ae:
-        logging.error(f"Azure API Error during cleanup: {ae.message}")
-    except Exception as e:
-        logging.error(f"Unexpected error during cleanup: {str(e)}")
+    for snapshot in snapshots:
+        # Check snapshot creation time against retention policy
+        age_days = (now - snapshot.time_created).days
+        if age_days > RETENTION_DAYS:
+            logging.info(f"Deleting snapshot '{snapshot.name}' (Age: {age_days} days)...")
+            poller = compute_client.snapshots.begin_delete(resource_group, snapshot.name)
+            poller.result()
+            logging.info(f"Deleted snapshot '{snapshot.name}'.")
 
 if __name__ == "__main__":
-    run_cleanup()
+    cleanup_snapshots()
